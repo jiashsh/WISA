@@ -21,15 +21,15 @@ parser.add_argument('-hl', '--hl', type=int, default=512)
 parser.add_argument('-pl', '--pl', type=int, default=64)
 parser.add_argument('-k', '--kernel_size', type=int, default=3)
 parser.add_argument('-l', '--logpath', type=str, default='WISA')
+parser.add_argument('-m', '--model_name', type=str, default='model_best')
 parser.add_argument('-r', '--resume_from', type=str, default=None)
 parser.add_argument('--dataroot', type=str, default=None)
 parser.add_argument('--subdir', type=str, default=None)
 args = parser.parse_args()
-
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-device_ids = list(range(torch.cuda.device_count())) 
+os.environ["CUDA_VISIBLE_DEVICES"] = str(args.cuda)
 
 resume_folder = args.resume_from
+model_name = args.model_name
 batch_size = args.batch_size
 learning_rate = 1e-4
 train_epoch = args.epoch
@@ -113,7 +113,7 @@ def main():
     im=item0['image']
 
     lpips_m=lpips.LPIPS(net='alex')
-    lpips_model = torch.nn.DataParallel(lpips_m).to(device) 
+    lpips_model = torch.nn.DataParallel(lpips_m).cuda()
 
     T, spH= s.shape
     s = s[None, :, 0:1]
@@ -127,20 +127,16 @@ def main():
     
     ch,imH,imW = im.shape
 
-    model = Dwt1dResnetX_TCN_WISA(inc=T, wvlname=wvlname, J=j, yl_size=yl_size, yh_size=yh_size,
-                                       num_residual_blocks=3, norm=None, ks=ks, input_neuron=spH,
-                                       output_neuron=imH * imW, nx=imH, ny=imW)
     if args.resume_from:
         print("loading model weights from ", resume_folder)
-        saved_state_dict = torch.load(os.path.join(resume_folder, 'model_best.pt'))
-        model.load_state_dict(saved_state_dict.module.state_dict())
-        print("Weighted loaded.")
-
-    # initialize model
-    model = model.to(device)  # copy model from cpu to gpu
-    if len(device_ids) > 1:
-        model = torch.nn.DataParallel(model, device_ids=device_ids)
-
+        model = torch.load(os.path.join(resume_folder, model_name+'.pt'))
+    else:
+        print("create new model")
+        model = Dwt1dResnetX_TCN_WISA(inc=T, wvlname=wvlname, J=j, yl_size=yl_size, yh_size=yh_size,
+                                        norm=None, ks=ks, input_neuron=spH,
+                                       output_neuron=imH * imW, nx=imH, ny=imW)
+    model = torch.nn.DataParallel(model).cuda()
+    
     # optimizer
     if opt.lower() == 'adam':
         assert ('beta1' in opt_param_dict.keys() and 'beta2' in opt_param_dict.keys() and 'weight_decay' in opt_param_dict.keys())
@@ -164,8 +160,8 @@ def main():
 
         for i, item in enumerate(train_data_loader):
             start_time = time.time()
-            spikes = item['spikes'].to(device)
-            image = item['image'].to(device) 
+            spikes = item['spikes'].cuda()
+            image = item['image'].cuda()
             optimizer.zero_grad()
             pred = model(spikes)
             loss = F.mse_loss(image, pred)
@@ -199,8 +195,8 @@ def main():
                 total_time = 0
                 for i, item in enumerate(test_data_loader):
                     start_time = time.time()
-                    spikes = item['spikes'].to(device) 
-                    image = item['image'].to(device)
+                    spikes = item['spikes'].cuda() 
+                    image = item['image'].cuda()
                     pred = model(spikes)
                     lips = torch.squeeze(lpips_model(image, pred)).cpu().numpy()
                     prediction = pred[0].permute(1,2,0).cpu().numpy()
@@ -209,7 +205,7 @@ def main():
                     ssim= calculate_ssim(gt * 255.0, prediction * 255.0)
                     sum_ssim += ssim
                     sum_psnr += psnr
-                    sum_lpips += lips
+                    sum_lpips += lips.mean()
 
                     sum_num += 1
                     elapse_time = time.time() - start_time
